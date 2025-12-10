@@ -39,7 +39,6 @@ class IsingSampler:
         indices = torch.randperm(len(self.dataset))[:num_samples]
         samples, labels = zip(*[self.dataset[i] for i in indices])
         samples = torch.stack(samples).to(device)
-        samples = (samples + 1) / 2  # Map -1 to 0, 1 to 1
         labels = torch.stack(labels).to(device)
         return samples, labels
 
@@ -74,3 +73,34 @@ class GaussianBaseSampler:
             samples: shape (num_samples, C, H, W), z ~ N(0, I)
         """
         return torch.randn(num_samples, self.C, self.H, self.W, device=device)
+    
+class GlobalFlipSampler(nn.Module):
+    def __init__(self, L: int, device: str = "cpu"):
+        super().__init__()
+        self.L = L
+        self.device = device
+        base = torch.ones(1, 1, L, L)
+        self.register_buffer("base", base)
+
+    def sample(self, batch_size: int, device: str | None = None):
+        if device is None:
+            device = self.device
+        base = self.base.expand(batch_size, 1, self.L, self.L).to(device)
+        flips = torch.randint(0, 2, (batch_size, 1, 1, 1), device=device)
+        flips = 2 * flips - 1  # 0->-1, 1->+1
+        z = base * flips
+        return z, None
+    
+class GlobalUpSampler(nn.Module):
+    def __init__(self, L: int, device: str = "cpu"):
+        super().__init__()
+        self.L = L
+        self.device = device
+        base = torch.ones(1, 1, L, L)
+        self.register_buffer("base", base)
+
+    def sample(self, batch_size: int, device: str | None = None):
+        if device is None:
+            device = self.device
+        base = self.base.expand(batch_size, 1, self.L, self.L).to(device)
+        return base, None

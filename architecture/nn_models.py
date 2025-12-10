@@ -171,22 +171,29 @@ class IsingNet(nn.Module):
         x = self.final_conv(x)
 
         return x
-
-class VelocityField_onehot(nn.Module):
-    def __init__(self, L, dims, channels=32):
+    
+class TinyField(nn.Module):
+    def __init__(self, L, time_dim=64):
         super().__init__()
         self.L = L
-        self.time_mlp = FourierEncoder(channels)
+        self.time_mlp = FourierEncoder(time_dim)
+        # simple 1x1 conv: elementwise affine map
+        self.conv = nn.Conv2d(1, 1, kernel_size=1)
 
-        # Encode time into a channel and add to feature maps
-        self.conv1 = nn.Conv2d(dims, channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, 3, padding=1)
-        self.conv3 = nn.Conv2d(channels, dims, 3, padding=1)
+        # time -> scale, bias
+        self.t_to_ab = nn.Sequential(
+            nn.Linear(time_dim, 64),
+            nn.SiLU(),
+            nn.Linear(64, 2)  # outputs [a(t), b(t)]
+        )
 
-    def forward(self, x_t, t):
-        h = F.silu(self.conv1(x_t))
-        h = h + F.silu(self.conv2(h))
-        h = h + F.silu(self.time_mlp(t)[:, :, None, None])
-        v = self.conv3(h)                     # (B,2,L,L)
-        v = F.softmax(v, dim=1)
-        return v
+    def forward(self, x, t):
+        B, C, H, W = x.shape
+        t_emb = self.time_mlp(t)    # (B, time_dim)
+        ab = self.t_to_ab(t_emb)    # (B, 2)
+        a = ab[:, 0].view(B, 1, 1, 1)
+        b = ab[:, 1].view(B, 1, 1, 1)
+
+        # elementwise affine in x
+        y = a * x + b
+        return self.conv(y)

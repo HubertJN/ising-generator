@@ -18,8 +18,9 @@ class IsingTrainer:
 
         ut_theta = self.model(x,t)
         ut_ref = self.path.conditional_vector_field(x,z,t)
-        error = torch.einsum('bchw -> b', torch.square(ut_theta - ut_ref))
-        return torch.mean(error)
+        mse = torch.mean(torch.einsum('bchw -> b', torch.square(ut_theta - ut_ref)))
+        error = mse
+        return error
     
     def train(self, num_epochs: int, device: str, lr: float, batch_size: int):
         self.model.to(device)
@@ -32,3 +33,19 @@ class IsingTrainer:
             loss.backward()
             optimizer.step()
             pbar.set_description(f'Epoch {epoch}, loss: {loss.item()}')
+
+    def train_history(self, num_epochs: int, device: str, lr: float, batch_size: int):
+        self.model.to(device)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+
+        loss_history = []
+        pbar = tqdm(range(num_epochs))
+        for epoch in pbar:
+            optimizer.zero_grad()
+            loss = self.get_train_loss(batch_size)
+            loss.backward()
+            optimizer.step()
+            pbar.set_description(f'Epoch {epoch}, loss: {loss.item()}')
+            loss_history.append(loss.item())
+
+        return loss_history

@@ -14,7 +14,24 @@ class LinearFlow:
         return (1.0-t)*x0 + t*z
              
     def conditional_vector_field(self, x, z, t):
-        return (z - x) / (1.0 - t + 1e-4)
+        return (z - x) / (1.0 - t + 1e-8)
+    
+class GaussianFlow:
+    def __init__(self, p_data: IsingSampler, p_base: GaussianBaseSampler):
+        self.p_data = p_data
+        self.p_base = p_base
+
+    def sample_conditional_path(self, z, t):
+        x0 = self.p_base.sample(z.shape[0]).to(z.device)  
+        std = torch.sqrt(t)
+        mean = (1 - t) * x0 + t * z
+        eps = torch.randn_like(x0)
+        return mean + std * eps
+             
+    def conditional_vector_field(self, x, z, t):
+        std = torch.sqrt(t)
+        mean = (1 - t) * x + t * z
+        return (mean - x) / (std + 1e-8)
 
 class FlowSimulator:
     def __init__(self, model):
@@ -62,6 +79,7 @@ class FlowSimulator:
         """
         xs = [x.clone()]
         nts = ts.shape[1]
+
         for t_idx in tqdm(range(nts - 1)):
             t = ts[:, t_idx]
             h = ts[:, t_idx + 1] - ts[:, t_idx]
