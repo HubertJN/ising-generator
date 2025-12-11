@@ -1,6 +1,8 @@
 import torch
 import torch.nn as nn
-from typing import Optional
+from typing import Optional, Tuple
+from torchvision import datasets, transforms
+from torchvision.utils import make_grid
 
 import sys
 from pathlib import Path
@@ -103,4 +105,39 @@ class GlobalUpSampler(nn.Module):
         if device is None:
             device = self.device
         base = self.base.expand(batch_size, 1, self.L, self.L).to(device)
+        #label = torch.ones([batch_size, 1]).to(device)
         return base, None
+
+class MNISTSampler(nn.Module):
+    """
+    Sampleable wrapper for the MNIST dataset
+    """
+    def __init__(self, device: str = "cpu"):
+        super().__init__()
+        self.dataset = datasets.MNIST(
+            root='./data',
+            train=True,
+            download=True,
+            transform=transforms.Compose([
+                transforms.Resize((32, 32)),
+                transforms.ToTensor(),
+                transforms.Normalize((0.5,), (0.5,)),
+            ])
+        )
+        self.device = device
+    def sample(self, num_samples: int) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """
+        Args:
+            - num_samples: the desired number of samples
+        Returns:
+            - samples: shape (batch_size, c, h, w)
+            - labels: shape (batch_size, label_dim)
+        """
+        if num_samples > len(self.dataset):
+            raise ValueError(f"num_samples exceeds dataset size: {len(self.dataset)}")
+        
+        indices = torch.randperm(len(self.dataset))[:num_samples]
+        samples, labels = zip(*[self.dataset[i] for i in indices])
+        samples = torch.stack(samples).to(self.device)
+        labels = torch.tensor(labels, dtype=torch.int64).to(self.device)
+        return samples, labels

@@ -26,38 +26,9 @@ class FourierEncoder(nn.Module):
         sin_embed = torch.sin(freqs) # (bs, half_dim)
         cos_embed = torch.cos(freqs) # (bs, half_dim)
         return torch.cat([sin_embed, cos_embed], dim=-1) * math.sqrt(2) # (bs, dim)
-
-class VelocityField(nn.Module):
-    def __init__(self, L, time_dim=64, base_channels=32):
-        super().__init__()
-        self.L = L
-        self.time_mlp = FourierEncoder(time_dim)
-
-
-        # Encode time into a channel and add to feature maps
-        self.conv1 = nn.Conv2d(2, base_channels, 3, padding=1)
-        self.conv2 = nn.Conv2d(base_channels, base_channels, 3, padding=1)
-        self.conv3 = nn.Conv2d(base_channels, 1, 3, padding=1)
-
-    def forward(self, x_t, t):
-        # x_t: (B,1,L,L), t: (B,)
-        B, _, H, W = x_t.shape
-        t_embed = self.time_mlp(t)          # (B, time_dim)
-        # Reduce time embedding to a single channel by a linear map:
-        t_chan = t_embed.mean(dim=-1, keepdim=True)  # (B,1)
-        t_chan = t_chan.view(B, 1, 1, 1).expand(B, 1, H, W)
-
-
-        # concatenate: [x_t, time,]
-        inp = torch.cat([x_t, t_chan], dim=1)  # (B,2,L,L)
-
-        h = F.silu(self.conv1(inp))
-        h = F.silu(self.conv2(h))
-        v = self.conv3(h)                     # (B,1,L,L)
-        return v
     
 class ResidualLayer(nn.Module):
-    def __init__(self, channels: int, time_dim: int):
+    def __init__(self, channels: int, time_dim: int, y_dim: int):
         super().__init__()
         self.block1 = nn.Sequential(
             nn.SiLU(),
@@ -74,8 +45,13 @@ class ResidualLayer(nn.Module):
             nn.SiLU(),
             nn.Linear(time_dim, channels)
         )
+        self.y_adapter = nn.Sequential(
+            nn.Linear(y_dim, y_dim),
+            nn.SiLU(),
+            nn.Linear(y_dim, channels)
+        )
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         res = x.clone()
 
         x = self.block1(x)
@@ -83,52 +59,55 @@ class ResidualLayer(nn.Module):
         t_emb = self.time_adapter(t).unsqueeze(-1).unsqueeze(-1)
         x = x + t_emb
 
+        y_emb = self.y_adapter(y).unsqueeze(-1).unsqueeze(-1)
+        x = x + y_emb
+
         x = self.block2(x)
 
         return x + res
 
 class Encoder(nn.Module):
-    def __init__(self, channels_in: int, channels_out: int, time_dim: int, num_res_layers: int):
+    def __init__(self, channels_in: int, channels_out: int, time_dim: int, y_dim: int, num_res_layers: int):
         super().__init__()
         self.res_layers = nn.ModuleList([
-            ResidualLayer(channels_in, time_dim) for _ in range(num_res_layers)
+            ResidualLayer(channels_in, time_dim, y_dim) for _ in range(num_res_layers)
         ])
         self.downsample = nn.Conv2d(channels_in, channels_out, kernel_size=3, padding=1, padding_mode='circular')
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         for layer in self.res_layers:
-            x = layer(x, t)
+            x = layer(x, t, y)
         x = self.downsample(x)
         return x
 
 class Decoder(nn.Module):
-    def __init__(self, channels_in: int, channels_out: int, time_dim: int, num_res_layers: int):
+    def __init__(self, channels_in: int, channels_out: int, time_dim: int, y_dim: int, num_res_layers: int):
         super().__init__()
         self.res_layers = nn.ModuleList([
-            ResidualLayer(channels_out, time_dim) for _ in range(num_res_layers)
+            ResidualLayer(channels_out, time_dim, y_dim) for _ in range(num_res_layers)
         ])
         self.upsample = nn.Conv2d(channels_in, channels_out, kernel_size=3, padding=1)
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         x = self.upsample(x)
         for layer in self.res_layers:
-            x = layer(x, t)
+            x = layer(x, t, y)
         return x
     
 class Midcoder(nn.Module):
-    def __init__(self, channels: int, time_dim: int, num_res_layers: int):
+    def __init__(self, channels: int, time_dim: int, y_dim: int, num_res_layers: int):
         super().__init__()
         self.res_layers = nn.ModuleList([
-            ResidualLayer(channels, time_dim) for _ in range(num_res_layers)
+            ResidualLayer(channels, time_dim, y_dim) for _ in range(num_res_layers)
         ])
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         for layer in self.res_layers:
-            x = layer(x, t)
+            x = layer(x, t, y)
         return x
 
 class IsingNet(nn.Module):
-    def __init__(self, channels: List[int], time_dim: int, num_res_layers: int):
+    def __init__(self, channels: List[int], time_dim: int, y_dim: int, num_res_layers: int):
         super().__init__()
         self.init_conv = nn.Sequential(
             nn.Conv2d(1, channels[0], kernel_size=3, padding=1, padding_mode='circular'),
@@ -137,36 +116,39 @@ class IsingNet(nn.Module):
         )
 
         self.time_embedder = FourierEncoder(time_dim)
-        
+
+        self.y_embedder = nn.Embedding(num_embeddings = 11, embedding_dim = y_dim)
+
         encoders = []
         decoders = []
         for (curr_ch, next_ch) in zip(channels[:-1], channels[1:]):
-            encoders.append(Encoder(curr_ch, next_ch, time_dim, num_res_layers))
-            decoders.append(Decoder(next_ch, curr_ch, time_dim, num_res_layers))
+            encoders.append(Encoder(curr_ch, next_ch, time_dim, y_dim, num_res_layers))
+            decoders.append(Decoder(next_ch, curr_ch, time_dim, y_dim, num_res_layers))
         self.encoders = nn.ModuleList(encoders)
         self.decoders = nn.ModuleList(decoders[::-1])
     
-        self.midcoder = Midcoder(channels[-1], time_dim, num_res_layers)
+        self.midcoder = Midcoder(channels[-1], time_dim, y_dim, num_res_layers)
 
         self.final_conv = nn.Conv2d(channels[0], 1, kernel_size=3, padding=1, padding_mode='circular')
 
-    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
         t_emb = self.time_embedder(t)
+        y_emb = self.y_embedder(y)
 
         x = self.init_conv(x)
 
         residuals = []
 
         for encoder in self.encoders:
-            x = encoder(x, t_emb)
+            x = encoder(x, t_emb, y_emb)
             residuals.append(x.clone())
 
-        x = self.midcoder(x, t_emb)
+        x = self.midcoder(x, t_emb, y_emb)
 
         for decoder in self.decoders:
             res = residuals.pop()
             x = x + res
-            x = decoder(x, t_emb)
+            x = decoder(x, t_emb, y_emb)
 
         x = self.final_conv(x)
 

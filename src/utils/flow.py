@@ -86,3 +86,39 @@ class FlowSimulator:
             x = self.step(x, t, h, **kwargs)
             xs.append(x.clone())
         return torch.stack(xs, dim=1)
+    
+class CFGSimulator():
+    def __init__(self, model, guidance_scale: float = 1.0):
+        self.model = model
+        self.guidance_scale = guidance_scale
+
+    def step(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+        - x: (bs, c, h, w)
+        - t: (bs, 1, 1, 1)
+        - y: (bs,)
+        """
+        guided_vector_field = self.model(x, t, y)
+        unguided_y = torch.ones_like(y) * 10
+        unguided_vector_field = self.model(x, t, unguided_y)
+        return (1 - self.guidance_scale) * unguided_vector_field + self.guidance_scale * guided_vector_field
+    
+    @torch.no_grad()
+    def simulate(self, x: torch.Tensor, ts: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        Simulates using the discretization given by ts
+        Args:
+            - x: initial state, shape (bs, c, h, w)
+            - ts: timesteps, shape (bs, nts, 1, 1, 1)
+            - y: labels, shape (bs,)
+        Returns:
+            - x_final: final state at time ts[-1], shape (bs, c, h, w)
+        """
+        nts = ts.shape[1]
+        for t_idx in tqdm(range(nts - 1)):
+            t = ts[:, t_idx]
+            h = ts[:, t_idx + 1] - ts[:, t_idx]
+            v = self.step(x, t, y)
+            x = x + v * h
+        return x
