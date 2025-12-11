@@ -1,6 +1,6 @@
 from typing import List
 
-import tqdm
+from tqdm import tqdm
 from .dataset import IsotropicGaussian
 import torch
 import torch.nn as nn
@@ -73,9 +73,8 @@ class LinearBeta:
 class GaussianConditionalProbabilityPath(nn.Module):
     def __init__(self, p_data, p_simple_shape: List[int], alpha: LinearAlpha, beta: LinearBeta):
         super().__init__()
+        self.p_simple = IsotropicGaussian(shape = p_simple_shape, std = 1.0)
         self.p_data = p_data
-        p_simple = IsotropicGaussian(shape = p_simple_shape, std = 1.0)
-        self.p_simple = p_simple
         self.alpha = alpha
         self.beta = beta
 
