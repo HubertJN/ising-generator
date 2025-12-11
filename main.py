@@ -1,50 +1,40 @@
 import torch
 import torch.nn as nn
-from src.utils.flow import LinearFlow, FlowSimulator
-from src.utils.trainer import IsingFlowTrainer
-from architecture.nn_models import VelocityField
-from src.utils.dataset import IsingSampler, GaussianBaseSampler
+from src.utils.flow import GaussianFlow, CFGSimulator
+from src.utils.trainer import CFGTrainer
+from architecture.nn_models import IsingNet
+from src.utils.dataset import GaussianBaseSampler, MNISTSampler
+import os
 
-def main():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+def save_model(model, path):
+    torch.save(model.state_dict(), path)
+    print(f"Model saved to {path}")
 
-    # Path to training data (adjust as needed)
-    h5path = "../../data/gridstates_0.588_0.100.hdf5"
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"Using device: {device}")
 
-    # Create samplers
-    sampler = IsingSampler(h5path, device=device)
-    base = GaussianBaseSampler(channels=1, height=64, width=64)
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
-    # Create flow and model
-    flow = LinearFlow(sampler, base)
-    model = VelocityField(L=64)
+# Create samplers
+sampler = MNISTSampler(device=device)
+base = GaussianBaseSampler(channels=1, height=32, width=32)
 
-    z, _ = sampler.sample(10)        
-    t = torch.rand(1,1,1,1).to(z)
+# Create flow and model
+flow = GaussianFlow(sampler, base)
+model = IsingNet(
+    channels=[32, 64, 128],
+    time_dim=32,
+    num_res_layers=2
+).to(device)
 
-    print(flow.sample_conditional_path_onehot(z, t).shape)
+# Create trainer
+trainer = CFGTrainer(flow, model, eta=0.1)
 
-    # Create trainer
-    trainer = IsingFlowTrainer(flow, model)
+# Train the model
+print("Starting training...")
+loss_history = trainer.train(num_epochs=5000, device=device, lr=1e-3, batch_size=248)
+print("Training completed.")
 
-    # Train the model
-    print("Starting training...")
-    trainer.train_onehot(num_epochs=1000, device=device, lr=1e-3, batch_size=32)
-    print("Training completed.")
+# Save the final model
+save_model(model, 'final_model.pth')
 
-    exit()
-
-    # Optional: Sample some data after training
-    print("Sampling from trained model...")
-    with torch.no_grad():
-        simulator = FlowSimulator(model)
-        num_samples = 10
-        num_steps = 100
-        x_init = base.sample(num_samples, device=device)
-        ts = torch.linspace(0, 1, num_steps + 1, device=device).repeat(num_samples, 1, 1, 1, 1)
-        generated = simulator.simulate(x_init, ts)
-        print(f"Generated samples shape: {generated.shape}")
-
-if __name__ == "__main__":
-    main()
