@@ -13,7 +13,7 @@ def save_model(model, path):
 device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"Using device: {device}")
 
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 
 # Create samplers
 sampler = MNISTSampler(device=device)
@@ -24,6 +24,7 @@ flow = GaussianFlow(sampler, base)
 model = IsingNet(
     channels=[32, 64, 128],
     time_dim=32,
+    y_dim=32,
     num_res_layers=2
 ).to(device)
 
