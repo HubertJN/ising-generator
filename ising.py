@@ -1,11 +1,10 @@
 import torch
-from torchvision.utils import make_grid
-from matplotlib import pyplot as plt
 from src.utils.dataset import IsingSampler
-from src.utils.flow import GaussianConditionalProbabilityPath, LinearAlpha, LinearBeta, CFGVectorFieldODE, EulerSimulator
+from src.utils.flow import GaussianConditionalProbabilityPath, LinearAlpha, LinearBeta
 from architecture.nn_models import IsingNet
 from src.utils.trainer import IsingTrainer
 import os
+import numpy as np
 
 os.environ['CUDA_ALLOC_CONF'] = "expandable_segments:True"
 
