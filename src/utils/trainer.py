@@ -2,62 +2,32 @@ import torch
 import torch.nn as nn
 import torch.optim
 from tqdm import tqdm
-from .flow import LinearFlow, GaussianFlow
 import torch.nn.functional as F
 
-class IsingTrainer:
-    def __init__(self, path: LinearFlow, model: nn.Module):
-        self.path = path
-        self.model = model
+def model_size_b(model: nn.Module) -> int:
+    """
+    Returns model size in bytes. Based on https://discuss.pytorch.org/t/finding-model-size/130275/2
+    Args:
+    - model: self-explanatory
+    Returns:
+    - size: model size in bytes
+    """
+    size = 0
+    for param in model.parameters():
+        size += param.nelement() * param.element_size()
+    for buf in model.buffers():
+        size += buf.nelement() * buf.element_size()
+    return size
 
-    def get_train_loss(self, batch_size: int) -> torch.Tensor:
-        z, _ = self.path.p_data.sample(batch_size)
-                
-        t = torch.rand(batch_size,1,1,1).to(z)
-        x = self.path.sample_conditional_path(z,t)
-
-        ut_theta = self.model(x,t)
-        ut_ref = self.path.conditional_vector_field(x,z,t)
-        mse = torch.mean(torch.einsum('bchw -> b', torch.square(ut_theta - ut_ref)))
-        error = mse
-        return error
-    
-    def train(self, num_epochs: int, device: str, lr: float, batch_size: int):
-        self.model.to(device)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-
-        pbar = tqdm(range(num_epochs))
-        for epoch in pbar:
-            optimizer.zero_grad()
-            loss = self.get_train_loss(batch_size)
-            loss.backward()
-            optimizer.step()
-            pbar.set_description(f'Epoch {epoch}, loss: {loss.item()}')
-
-    def train_history(self, num_epochs: int, device: str, lr: float, batch_size: int):
-        self.model.to(device)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
-
-        loss_history = []
-        pbar = tqdm(range(num_epochs))
-        for epoch in pbar:
-            optimizer.zero_grad()
-            loss = self.get_train_loss(batch_size)
-            loss.backward()
-            optimizer.step()
-            pbar.set_description(f'Epoch {epoch}, loss: {loss.item()}')
-            loss_history.append(loss.item())
-
-        return loss_history
-    
+MiB = 1024 * 1024
 
 class CFGTrainer:
-    def __init__(self, path: GaussianFlow, model: nn.Module, eta: float):
+    def __init__(self, path, model, eta: float):
         assert eta > 0 and eta < 1
         super().__init__()
+        self.model = model
         self.eta = eta
         self.path = path
-        self.model = model
 
     def get_train_loss(self, batch_size: int) -> torch.Tensor:
         # Step 1: Sample z,y from p_data
@@ -76,15 +46,28 @@ class CFGTrainer:
         ut_ref = self.path.conditional_vector_field(x,z,t) # (bs, 1, 32, 32)
         error = torch.einsum('bchw -> b', torch.square(ut_theta - ut_ref)) # (bs,)
         return torch.mean(error)
+    
+    def get_optimizer(self, lr: float):
+        return torch.optim.Adam(self.model.parameters(), lr=lr)
 
-    def train(self, num_epochs: int, device: str, lr: float, batch_size: int):
+    def train(self, num_epochs: int, device: torch.device, lr: float = 1e-3, **kwargs) -> torch.Tensor:
+        # Report model size
+        size_b = model_size_b(self.model)
+        print(f'Training model with size: {size_b / MiB:.3f} MiB')
+        
+        # Start
         self.model.to(device)
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=lr)
+        opt = self.get_optimizer(lr)
+        self.model.train()
 
-        pbar = tqdm(range(num_epochs))
-        for epoch in pbar:
-            optimizer.zero_grad()
-            loss = self.get_train_loss(batch_size)
+        # Train loop
+        pbar = tqdm(enumerate(range(num_epochs)))
+        for idx, epoch in pbar:
+            opt.zero_grad()
+            loss = self.get_train_loss(**kwargs)
             loss.backward()
-            optimizer.step()
-            pbar.set_description(f'Epoch {epoch}, loss: {loss.item()}')
+            opt.step()
+            pbar.set_description(f'Epoch {idx}, loss: {loss.item():.3f}')
+
+        # Finish
+        self.model.eval()

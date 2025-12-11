@@ -1,61 +1,184 @@
-from .dataset import IsingSampler, GaussianBaseSampler
+from typing import List
+
+import tqdm
+from .dataset import IsotropicGaussian
 import torch
 import torch.nn as nn
-from tqdm import tqdm
-import torch.nn.functional as F
 
-class LinearFlow:
-    def __init__(self, p_data: IsingSampler, p_base: GaussianBaseSampler):
-        self.p_data = p_data
-        self.p_base = p_base
-
-    def sample_conditional_path(self, z, t):
-        x0 = self.p_base.sample(z.shape[0]).to(z.device)  
-        return (1.0-t)*x0 + t*z
-             
-    def conditional_vector_field(self, x, z, t):
-        return (z - x) / (1.0 - t + 1e-8)
+class LinearAlpha:
+    """
+    Implements alpha_t = t
+    """
+    def __init__(self):
+        # Check alpha_t(0) = 0
+        assert torch.allclose(
+            self(torch.zeros(1,1,1,1)), torch.zeros(1,1,1,1)
+        )
+        # Check alpha_1 = 1
+        assert torch.allclose(
+            self(torch.ones(1,1,1,1)), torch.ones(1,1,1,1)
+        )
     
-class GaussianFlow:
-    def __init__(self, p_data: IsingSampler, p_base: GaussianBaseSampler):
-        self.p_data = p_data
-        self.p_base = p_base
-
-    def sample_conditional_path(self, z, t):
-        x0 = self.p_base.sample(z.shape[0]).to(z.device)  
-        std = torch.sqrt(t)
-        mean = (1 - t) * x0 + t * z
-        eps = torch.randn_like(x0)
-        return mean + std * eps
-             
-    def conditional_vector_field(self, x, z, t):
-        std = torch.sqrt(t)
-        mean = (1 - t) * x + t * z
-        return (mean - x) / (std + 1e-8)
-
-class FlowSimulator:
-    def __init__(self, model):
-        self.model = model
-
-    def step(self, xt: torch.Tensor, t: torch.Tensor, dt: torch.Tensor, **kwargs):
+    def __call__(self, t: torch.Tensor) -> torch.Tensor:
         """
-        Takes one Euler simulation step
         Args:
-            - xt: state at time t, shape (bs, c, h, w)
-            - t: time, shape (bs, 1, 1, 1)
-            - dt: time step, shape (bs, 1, 1, 1)
+            - t: time (num_samples, 1, 1, 1)
         Returns:
-            - nxt: state at time t + dt (bs, c, h, w)
+            - alpha_t (num_samples, 1, 1, 1)
+        """ 
+        return t
+    
+    def dt(self, t: torch.Tensor) -> torch.Tensor:
         """
-        v = self.model(xt, t)
-        return xt + v * dt
+        Evaluates d/dt alpha_t.
+        Args:
+            - t: time (num_samples, 1, 1, 1)
+        Returns:
+            - d/dt alpha_t (num_samples, 1, 1, 1)
+        """ 
+        return torch.ones_like(t)
+        
+class LinearBeta:
+    """
+    Implements beta_t = 1-t
+    """
+    def __init__(self):
+        # Check beta_0 = 1
+        assert torch.allclose(
+            self(torch.zeros(1,1,1,1)), torch.ones(1,1,1,1)
+        )
+        # Check beta_1 = 0
+        assert torch.allclose(
+            self(torch.ones(1,1,1,1)), torch.zeros(1,1,1,1)
+        )
+    def __call__(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            - t: time (num_samples, 1)
+        Returns:
+            - beta_t (num_samples, 1)
+        """ 
+        return 1-t
+        
+    def dt(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Evaluates d/dt alpha_t.
+        Args:
+            - t: time (num_samples, 1, 1, 1)
+        Returns:
+            - d/dt alpha_t (num_samples, 1, 1, 1)
+        """ 
+        return - torch.ones_like(t)
+    
+class GaussianConditionalProbabilityPath(nn.Module):
+    def __init__(self, p_data, p_simple_shape: List[int], alpha: LinearAlpha, beta: LinearBeta):
+        super().__init__()
+        self.p_data = p_data
+        p_simple = IsotropicGaussian(shape = p_simple_shape, std = 1.0)
+        self.p_simple = p_simple
+        self.alpha = alpha
+        self.beta = beta
+
+    def sample_marginal_path(self, t: torch.Tensor) -> torch.Tensor:
+        """
+        Samples from the marginal distribution p_t(x) = p_t(x|z) p(z)
+        Args:
+            - t: time (num_samples, 1, 1, 1)
+        Returns:
+            - x: samples from p_t(x), (num_samples, c, h, w)
+        """
+        num_samples = t.shape[0]
+        # Sample conditioning variable z ~ p(z)
+        z, _ = self.sample_conditioning_variable(num_samples) # (num_samples, c, h, w)
+        # Sample conditional probability path x ~ p_t(x|z)
+        x = self.sample_conditional_path(z, t) # (num_samples, c, h, w)
+        return x
+    
+    def sample_conditioning_variable(self, num_samples: int) -> torch.Tensor:
+        """
+        Samples the conditioning variable z and label y
+        Args:
+            - num_samples: the number of samples
+        Returns:
+            - z: (num_samples, c, h, w)
+            - y: (num_samples, label_dim)
+        """
+        return self.p_data.sample(num_samples)
+    
+    def sample_conditional_path(self, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Samples from the conditional distribution p_t(x|z)
+        Args:
+            - z: conditioning variable (num_samples, c, h, w)
+            - t: time (num_samples, 1, 1, 1)
+        Returns:
+            - x: samples from p_t(x|z), (num_samples, c, h, w)
+        """
+        return self.alpha(t) * z + self.beta(t) * torch.randn_like(z)
+        
+    def conditional_vector_field(self, x: torch.Tensor, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Evaluates the conditional vector field u_t(x|z)
+        Args:
+            - x: position variable (num_samples, c, h, w)
+            - z: conditioning variable (num_samples, c, h, w)
+            - t: time (num_samples, 1, 1, 1)
+        Returns:
+            - conditional_vector_field: conditional vector field (num_samples, c, h, w)
+        """ 
+        alpha_t = self.alpha(t) # (num_samples, 1, 1, 1)
+        beta_t = self.beta(t) # (num_samples, 1, 1, 1)
+        dt_alpha_t = self.alpha.dt(t) # (num_samples, 1, 1, 1)
+        dt_beta_t = self.beta.dt(t) # (num_samples, 1, 1, 1)
+
+        return (dt_alpha_t - dt_beta_t / beta_t * alpha_t) * z + dt_beta_t / beta_t * x
+
+    def conditional_score(self, x: torch.Tensor, z: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        """
+        Evaluates the conditional score of p_t(x|z)
+        Args:
+            - x: position variable (num_samples, c, h, w)
+            - z: conditioning variable (num_samples, c, h, w)
+            - t: time (num_samples, 1, 1, 1)
+        Returns:
+            - conditional_score: conditional score (num_samples, c, h, w)
+        """ 
+        alpha_t = self.alpha(t)
+        beta_t = self.beta(t)
+        return (z * alpha_t - x) / beta_t ** 2
+    
+class CFGVectorFieldODE:
+    def __init__(self, net, guidance_scale: float = 1.0):
+        super().__init__()
+        self.net = net
+        self.guidance_scale = guidance_scale
+
+    def drift_coefficient(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+        - x: (bs, c, h, w)
+        - t: (bs, 1, 1, 1)
+        - y: (bs,)
+        """
+        guided_vector_field = self.net(x, t, y)
+        unguided_y = torch.ones_like(y) * 10
+        unguided_vector_field = self.net(x, t, unguided_y)
+        return (1 - self.guidance_scale) * unguided_vector_field + self.guidance_scale * guided_vector_field
+
+class EulerSimulator:
+    def __init__(self, ode):
+        super().__init__()
+        self.ode = ode
+        
+    def step(self, xt: torch.Tensor, t: torch.Tensor, h: torch.Tensor, **kwargs):
+        return xt + self.ode.drift_coefficient(xt,t, **kwargs) * h
 
     @torch.no_grad()
     def simulate(self, x: torch.Tensor, ts: torch.Tensor, **kwargs):
         """
-        Simulates using the discretization given by ts
+        Simulates using the discretization gives by ts
         Args:
-            - x: initial state, shape (bs, c, h, w)
+            - x_init: initial state, shape (bs, c, h, w)
             - ts: timesteps, shape (bs, nts, 1, 1, 1)
         Returns:
             - x_final: final state at time ts[-1], shape (bs, c, h, w)
@@ -70,7 +193,7 @@ class FlowSimulator:
     @torch.no_grad()
     def simulate_with_trajectory(self, x: torch.Tensor, ts: torch.Tensor, **kwargs):
         """
-        Simulates using the discretization given by ts
+        Simulates using the discretization gives by ts
         Args:
             - x: initial state, shape (bs, c, h, w)
             - ts: timesteps, shape (bs, nts, 1, 1, 1)
@@ -79,46 +202,9 @@ class FlowSimulator:
         """
         xs = [x.clone()]
         nts = ts.shape[1]
-
         for t_idx in tqdm(range(nts - 1)):
-            t = ts[:, t_idx]
+            t = ts[:,t_idx]
             h = ts[:, t_idx + 1] - ts[:, t_idx]
             x = self.step(x, t, h, **kwargs)
             xs.append(x.clone())
         return torch.stack(xs, dim=1)
-    
-class CFGSimulator():
-    def __init__(self, model, guidance_scale: float = 1.0):
-        self.model = model
-        self.guidance_scale = guidance_scale
-
-    def step(self, x: torch.Tensor, t: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-        - x: (bs, c, h, w)
-        - t: (bs, 1, 1, 1)
-        - y: (bs,)
-        """
-        guided_vector_field = self.model(x, t, y)
-        unguided_y = torch.ones_like(y) * 10
-        unguided_vector_field = self.model(x, t, unguided_y)
-        return (1 - self.guidance_scale) * unguided_vector_field + self.guidance_scale * guided_vector_field
-    
-    @torch.no_grad()
-    def simulate(self, x: torch.Tensor, ts: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """
-        Simulates using the discretization given by ts
-        Args:
-            - x: initial state, shape (bs, c, h, w)
-            - ts: timesteps, shape (bs, nts, 1, 1, 1)
-            - y: labels, shape (bs,)
-        Returns:
-            - x_final: final state at time ts[-1], shape (bs, c, h, w)
-        """
-        nts = ts.shape[1]
-        for t_idx in tqdm(range(nts - 1)):
-            t = ts[:, t_idx]
-            h = ts[:, t_idx + 1] - ts[:, t_idx]
-            v = self.step(x, t, y)
-            x = x + v * h
-        return x
