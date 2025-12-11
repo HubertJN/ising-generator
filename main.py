@@ -1,6 +1,5 @@
 import torch
-from torchvision.utils import make_grid
-from matplotlib import pyplot as plt
+import numpy as np
 from src.utils.dataset import MNISTSampler
 from src.utils.flow import GaussianConditionalProbabilityPath, LinearAlpha, LinearBeta
 from architecture.nn_models import IsingNet
@@ -28,8 +27,11 @@ unet = IsingNet(
 trainer = CFGTrainer(path = path, model = unet, eta=0.1)
 
 # Train!
-trainer.train(num_epochs = 5000, device=device, lr=1e-3, batch_size=250)
+loss_history = trainer.train(num_epochs = 5000, device=device, lr=1e-3, batch_size=250)
 
 # Save final weights for later reuse
 torch.save(unet.state_dict(), "final_model.pth")
+
+# Save training loss history
+np.save("loss_history.npy", np.array(loss_history))
 
