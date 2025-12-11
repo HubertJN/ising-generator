@@ -50,7 +50,7 @@ class CFGTrainer:
     def get_optimizer(self, lr: float):
         return torch.optim.Adam(self.model.parameters(), lr=lr)
 
-    def train(self, num_epochs: int, device: torch.device, lr: float = 1e-3, **kwargs) -> torch.Tensor:
+    def train(self, num_epochs: int, device: torch.device, lr: float = 1e-3, **kwargs) -> list[float]:
         # Report model size
         size_b = model_size_b(self.model)
         print(f'Training model with size: {size_b / MiB:.3f} MiB')
@@ -61,13 +61,20 @@ class CFGTrainer:
         self.model.train()
 
         # Train loop
-        pbar = tqdm(enumerate(range(num_epochs)))
+        pbar = tqdm(
+            enumerate(range(num_epochs)),
+            total=num_epochs,
+            bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+        )
+        loss_history: list[float] = []
         for idx, epoch in pbar:
             opt.zero_grad()
             loss = self.get_train_loss(**kwargs)
             loss.backward()
             opt.step()
             pbar.set_description(f'Epoch {idx}, loss: {loss.item():.3f}')
+            loss_history.append(loss.item())
 
         # Finish
         self.model.eval()
+        return loss_history
