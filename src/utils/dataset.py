@@ -2,7 +2,17 @@ import torch
 import torch.nn as nn
 from typing import Optional, Tuple, List
 from torchvision import datasets, transforms
+from torch.utils.data import Dataset
 
+import sys
+from pathlib import Path
+
+parent_dir = Path.cwd().parent  # Adjust path as needed
+sys.path.insert(0, str(parent_dir))
+
+from modules.dataset import load_hdf5_raw, to_cnn_dataset
+
+NUM_COMMITTOR_LABELS = 20
 class IsotropicGaussian(nn.Module):
     """
     Sampleable wrapper around torch.randn
@@ -53,3 +63,45 @@ class MNISTSampler(nn.Module):
         samples = torch.stack(samples).to(self.dummy.device)
         labels = torch.tensor(labels, dtype=torch.int64).to(self.dummy.device)
         return samples, labels
+    
+class IsingSampler(nn.Module):
+    """
+    Sampleable wrapper for the Ising dataset.
+    """
+    def __init__(self, hdf5_path: str):
+        super().__init__()
+        grids, attrs, _ = load_hdf5_raw(hdf5_path, load_grids=True)
+        self.dataset = IsingDataset(grids, attrs)
+        self.N = len(self.dataset)
+        self.dummy = nn.Buffer(torch.zeros(1))
+
+    def sample(self, num_samples: int) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+        """"
+        Args:
+            - num_samples: the desired number of samples
+        Returns:
+            - samples: shape (batch_size, c, h, w)
+            - labels: shape (batch_size, label_dim)
+        """
+
+        if num_samples > len(self.dataset):
+            raise ValueError(f"num_samples exceeds dataset size: {len(self.dataset)}")
+
+        indices = torch.randperm(len(self.dataset))[:num_samples]
+        samples, labels = zip(*[self.dataset[i] for i in indices])
+        samples = torch.stack(samples).to(self.dummy.device)
+        labels = torch.tensor(labels, dtype=torch.int64).to(self.dummy.device)
+        return samples, labels
+    
+class IsingDataset(Dataset):
+    def __init__(self, grids, labels):
+        self.data = torch.tensor(grids, dtype=torch.float32).unsqueeze(1)  # Add channel dimension
+        magnetizations = torch.tensor(labels[:, 0])
+        quantized = (((magnetizations + 1)/2)*20).long()
+        self.labels = quantized
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, idx):
+        return self.data[idx], self.labels[idx]
